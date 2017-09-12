@@ -1,0 +1,290 @@
+name: "LeNet"
+layer {
+  name: "mnist"
+  type: "Data"
+  top: "data"
+  top: "label"
+  include {
+    phase: TRAIN
+  }
+  transform_param {
+    scale: 0.00390625
+  }
+  data_param {
+    source: "examples/mnist/mnist_train_lmdb"
+    batch_size: 64
+    backend: LMDB
+  }
+}
+layer {
+  name: "mnist"
+  type: "Data"
+  top: "data"
+  top: "label"
+  include {
+    phase: TEST
+  }
+  transform_param {
+    scale: 0.00390625
+  }
+  data_param {
+    source: "examples/mnist/mnist_test_lmdb"
+    batch_size: 100
+    backend: LMDB
+  }
+}
+
+
+layer {
+  name: "conv1"
+  type: "Convolution"
+  bottom: "data"
+  top: "conv1"
+  param {
+    lr_mult: 1
+  }
+  param {
+    lr_mult: 2
+  }
+  convolution_param {
+    num_output: 480 #Number of filters = Original Number of filters x Number of Layers  - Example 20 filters x 24 parallel layers = 480 filters.    
+    kernel_size: 7
+    stride: 1
+	rotation_stride: 15  #Rotation interval
+	enlarge_rotate: 0
+    weight_filler {
+      type: "gaussian"
+      std: 0.001
+    }
+    bias_filler {
+      type: "constant"
+    }
+  }
+}
+
+layer {
+name: "rotmax1"
+type: "Rot_max"
+top: "conv1-max"
+bottom: "conv1"
+
+rot_max_param {
+  rot_num: 24 #360 divided by rotation interval (ie how many parallel layers)
+}}
+
+
+layer { 
+bottom: 'conv1-max' 
+top: 'conv1-bn' 
+name: 'conv1-bn' 
+type: 'BatchNorm'
+  #batch_norm_param {
+  #  use_global_stats: false  # calculate the mean and variance for each mini-batch
+  #  moving_average_fraction: .999  # doesn't effect training 
+  #}
+  param { lr_mult: 0 } 
+  param { lr_mult: 0 } 
+  param { lr_mult: 0 }
+}
+layer {
+  name: "pool1"
+  type: "Pooling"
+  bottom: "conv1-bn"
+  top: "pool1"
+  pooling_param {
+    pool: MAX
+    kernel_size: 2
+    stride: 2
+  }
+}
+#layer {
+ # name: "relu1"
+ # type: "ReLU"
+ # bottom: "pool1"
+ # top: "pool1"
+#}
+layer {
+  name: "conv2"
+  type: "Convolution"
+  bottom: "pool1"
+  top: "conv2"
+  param {
+    lr_mult: 1
+  }
+  param {
+    lr_mult: 2
+  }
+  convolution_param {
+    num_output: 1200
+    kernel_size: 5
+	rotation_stride: 15
+	enlarge_rotate: 0
+    stride: 1
+    weight_filler {
+      type: "gaussian"
+	std: 0.001 
+    }
+    bias_filler {
+      type: "constant"
+    }
+  }
+}
+layer {
+name: "rotmax2"
+type: "Rot_max"
+top: "conv2-max"
+bottom: "conv2"
+
+rot_max_param {
+  rot_num: 24
+}}
+
+
+layer { 
+bottom: 'conv2-max' 
+top: 'conv2-bn' 
+name: 'conv2-bn' 
+type: 'BatchNorm'
+  #batch_norm_param {
+   # use_global_stats: false  # calculate the mean and variance for each mini-batch
+   # moving_average_fraction: .999  # doesn't effect training 
+  #}
+  param { lr_mult: 0 } 
+  param { lr_mult: 0 } 
+  param { lr_mult: 0 }
+}
+layer {
+  name: "pool2"
+  type: "Pooling"
+  bottom: "conv2-bn"
+  top: "pool2"
+  pooling_param {
+    pool: MAX
+    kernel_size: 2
+    stride: 1
+  }
+}
+#layer {
+ # name: "relu2"
+ # type: "ReLU"
+ # bottom: "pool2"
+ # top: "pool2"
+#}
+
+#layer {
+ # name: "ip1"
+ # type: "InnerProduct"
+ # bottom: "pool2"
+ # top: "ip1"
+ # param {
+ #   lr_mult: 1
+ # }
+ # param {
+ #   lr_mult: 2
+ # }
+ # inner_product_param {
+ #   num_output: 500
+ #   weight_filler {
+ #     type: "xavier"
+ #   }
+ #   bias_filler {
+ #     type: "constant"
+ #   }
+ # }
+#}
+layer {
+  name: "ip1"
+  type: "Convolution"
+  bottom: "pool2"
+  top: "ip1"
+  param {
+    lr_mult: 1
+  }
+  param {
+    lr_mult: 2
+  }
+  convolution_param {
+    num_output: 6000
+    kernel_size: 6
+    stride: 1
+	rotation_stride: 15
+	enlarge_rotate: 0
+    weight_filler {
+      type: "gaussian"
+      std: 0.01
+    }
+    bias_filler {
+      type: "constant"
+    }
+  }
+}
+
+layer {
+name: "rotmax3"
+type: "Rot_max"
+top: "ip1-max"
+bottom: "ip1"
+
+rot_max_param {
+  rot_num: 24
+}}
+
+
+layer {
+  name: "relu3"
+  type: "ReLU"
+  bottom: "ip1-max"
+  top: "ip1-max"
+}
+layer { 
+bottom: 'ip1-max' 
+top: 'ip1-bn' 
+name: 'ip1-bn' 
+type: 'BatchNorm'
+  #batch_norm_param {
+   # use_global_stats: false  # calculate the mean and variance for each mini-batch
+   # moving_average_fraction: .999  # doesn't effect training 
+  #}
+  param { lr_mult: 0 } 
+  param { lr_mult: 0 } 
+  param { lr_mult: 0 }
+}
+layer {
+  name: "ip2"
+  type: "InnerProduct"
+  bottom: "ip1-bn"
+  top: "ip2"
+  param {
+    lr_mult: 1
+  }
+  param {
+    lr_mult: 2
+  }
+  inner_product_param {
+    num_output: 10
+    weight_filler {
+      type: "gaussian"
+      std: 0.001
+    }
+    bias_filler {
+      type: "constant"
+    }
+  }
+}
+layer {
+  name: "accuracy"
+  type: "Accuracy"
+  bottom: "ip2"
+  bottom: "label"
+  top: "accuracy"
+  include {
+    phase: TEST
+  }
+}
+layer {
+  name: "loss"
+  type: "SoftmaxWithLoss"
+  bottom: "ip2"
+  bottom: "label"
+  top: "loss"
+}

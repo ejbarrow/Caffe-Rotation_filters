@@ -1,0 +1,315 @@
+#include <vector>
+
+#include "caffe/layers/conv_layer.hpp"
+
+namespace caffe {
+
+template <typename Dtype>
+void ConvolutionLayer<Dtype>::Forward_gpu(const vector<Blob<Dtype>*>& bottom,
+      const vector<Blob<Dtype>*>& top) {
+	if (this->rotation_stride_ == 360){ // if not master rotation layer - do normal forward
+	  const Dtype* weight = this->blobs_[0]->gpu_data();
+	  for (int i = 0; i < bottom.size(); ++i) {
+		const Dtype* bottom_data = bottom[i]->gpu_data();
+		Dtype* top_data = top[i]->mutable_gpu_data();
+		for (int n = 0; n < this->num_; ++n) {
+		  this->forward_gpu_gemm(bottom_data + n * this->bottom_dim_, weight,
+			  top_data + n * this->top_dim_);
+		  if (this->bias_term_) {
+			const Dtype* bias = this->blobs_[1]->gpu_data();
+			this->forward_gpu_bias(top_data + n * this->top_dim_, bias);
+		  }
+		}
+	  }
+	 }else
+	 {
+		//Master layer forward prop here
+			const Dtype* weight = this->blobs_[0]->gpu_data();
+			const Dtype* bias = this->blobs_[1]->gpu_data();
+			int size = this->num_layers_;
+
+			vector< vector<Blob<Dtype>*> > bottomvector(size + 1, vector<Blob<Dtype>*>(1));
+			vector< vector<Blob<Dtype>*> > topvector(size + 1, vector<Blob<Dtype>*>(1));
+
+			Blob<Dtype>* tempTopPoint = top[0]; //0 ?
+			Blob<Dtype>* tempBottomPoint = bottom[0];  // 0?
+
+			//create copies of top and bottom for each network to use
+			for (int n = 0; n < size + 1; ++n){
+				bottomvector[n][0] = new Blob<Dtype>(1, 1, 1, 1);
+				topvector[n][0] = new Blob<Dtype>(1, 1, 1, 1);
+
+				bottomvector[n][0]->CopyFrom(*tempBottomPoint, 0, 1);
+				topvector[n][0]->CopyFrom(*tempTopPoint, 0, 1);
+			}
+
+
+			//Give updated weights to each layer
+			//#pragma omp target{
+				#pragma omp parallel for 
+				for (int n = 0; n < size; ++n){
+					this->Conv_Layers_[n]->SetWeights_gpu(weight, bias);
+				}
+			//}
+
+			//Circulise each Layer
+			//#pragma omp target{
+				#pragma omp parallel for 
+				for (int n = 0; n < size; ++n){
+						this->Conv_Layers_[n]->Circulise_weights_gpu();
+				}
+			//}
+
+
+			//Rotate each Layer
+			//#pragma omp target{
+noFocus = 0;				#pragma omp parallel for 
+				for (int n = 0; n < size; ++n){
+					if (n != 0){
+						this->Conv_Layers_[n]->SetRotate_gpu(n*this->rotation_stride_);
+					}
+				}
+			//}
+
+			//Forward propoigate each layer
+			//#pragma omp target{
+				#pragma omp parallel for 
+				for (int n = 0; n < size; ++n){
+					this->Conv_Layers_[n]->Forward(bottomvector[n], topvector[n]);  //split blobs for each parrelel layer
+				}
+			//}
+
+
+			//calculate winners - merge to one output
+			Dtype* winners = topvector[size][0]->mutable_gpu_data();
+
+			Dtype* topOutput = top[0]->mutable_gpu_data();
+
+			for (int Fnum = 0; Fnum < topvector[0][0]->shape(0); ++Fnum){  //for each num
+				for (int Fchan = 0; Fchan < topvector[0][0]->shape(1); ++Fchan){  //for each channel
+					for (int Fheight = 0; Fheight < topvector[0][0]->shape(2); ++Fheight){  //for each height
+						for (int Fwidth = 0; Fwidth < topvector[0][0]->shape(3); ++Fwidth){  //for each width
+							//calculate address in array
+							int address = ((Fnum * topvector[0][0]->shape(1) + Fchan) * topvector[0][0]->shape(2) + Fheight) * topvector[0][0]->shape(3) + Fwidth;
+							int winner = 0;
+							Dtype winnerval = 0.0;
+
+
+
+							for (int Flay = 0; Flay < size; ++Flay){ //for each layer
+								if (fabs(winnerval) < fabs(topvector[Flay][0]->data_at(Fnum, Fchan, Fheight, Fwidth))){
+									winner = Flay;
+									winnerval = topvector[Flay][0]->data_at(Fnum, Fchan, Fheight, Fwidth);
+								}
+							}
+
+							//winning layer with highest average get stored into top here //Winning layer noted for this num and channel
+					  {
+						  //use mutable_gpu_data
+						  topOutput[address] = winnerval;
+						  winners[address] = winner; 
+					  }
+						}
+					}
+				}
+			}
+
+			//clear up memory
+			delete winnersaveBlob_;
+			delete bottomvector[size][0];
+			winnersaveBlob_ = topvector[size][0]; //Save blob holding winning layers
+
+			for (int Flay = 0; Flay < size; ++Flay){ //for each layer
+				delete bottomvector[Flay][0];
+				delete topvector[Flay][0];
+			}
+	 
+	 
+	 
+	 }
+}
+
+template <typename Dtype>
+void ConvolutionLayer<Dtype>::Backward_gpu(const vector<Blob<Dtype>*>& top,
+      const vector<bool>& propagate_down, const vector<Blob<Dtype>*>& bottom) {
+
+	  if (this->rotation_stride_ == 360){
+			  const Dtype* weight = this->blobs_[0]->gpu_data();
+			  Dtype* weight_diff = this->blobs_[0]->mutable_gpu_diff();
+			  for (int i = 0; i < top.size(); ++i) {
+				const Dtype* top_diff = top[i]->gpu_diff();
+				// Bias gradient, if necessary.
+				if (this->bias_term_ && this->param_propagate_down_[1]) {
+				  Dtype* bias_diff = this->blobs_[1]->mutable_gpu_diff();
+				  for (int n = 0; n < this->num_; ++n) {
+					this->backward_gpu_bias(bias_diff, top_diff + n * this->top_dim_);
+				  }
+				}
+				if (this->param_propagate_down_[0] || propagate_down[i]) {
+				  const Dtype* bottom_data = bottom[i]->gpu_data();
+				  Dtype* bottom_diff = bottom[i]->mutable_gpu_diff();
+				  for (int n = 0; n < this->num_; ++n) {
+					// gradient w.r.t. weight. Note that we will accumulate diffs.
+					if (this->param_propagate_down_[0]) {
+					  this->weight_gpu_gemm(bottom_data + n * this->bottom_dim_,
+						  top_diff + n * this->top_dim_, weight_diff);
+					}
+					// gradient w.r.t. bottom data, if necessary.
+					if (propagate_down[i]) {
+					  this->backward_gpu_gemm(top_diff + n * this->top_dim_, weight,
+						  bottom_diff + n * this->bottom_dim_);
+					}
+				  }
+				}
+			  }
+		}
+		else{
+			//Master Layer Backward Prop here
+			//const Dtype* weight = this->blobs_[0]->gpu_data();
+			Dtype* weight_diff = this->blobs_[0]->mutable_gpu_diff();
+			int size = this->num_layers_;
+
+			Dtype* bias_diff;
+			if (this->bias_term_ && this->param_propagate_down_[1]) {
+				bias_diff = this->blobs_[1]->mutable_gpu_diff();
+				
+					
+			}
+
+
+			//Copy Blobs
+			vector< vector<Blob<Dtype>*> > bottomvector(size + 1, vector<Blob<Dtype>*>(1));
+			vector< vector<Blob<Dtype>*> > topvector(size + 1, vector<Blob<Dtype>*>(1));
+			//vector< vector<Blob<Dtype>*> > weight_diff_vector(size + 1, vector<Blob<Dtype>*>(1));
+			vector< vector<Blob<Dtype>*> > weight_diff_vector(size + 1, vector<Blob<Dtype>*>(2));
+
+			Blob<Dtype>* tempTopPoint = top[0]; //0 ?
+			Blob<Dtype>* tempBottomPoint = bottom[0];  // 0?
+			//Blob<Dtype>* tempWeight_diff = this->blobs_[0];  // 0?
+
+
+			//create copies of top and bottom for each network to use
+			for (int n = 0; n < size; ++n){
+				bottomvector[n][0] = new Blob<Dtype>(1, 1, 1, 1);
+				topvector[n][0] = new Blob<Dtype>(1, 1, 1, 1);
+				weight_diff_vector[n][0] = new Blob<Dtype>(1, 1, 1, 1);
+				weight_diff_vector[n][1] = new Blob<Dtype>(1, 1, 1, 1);
+
+				//bottomvector[n][0]->CopyFrom(*tempBottomPoint, 1, 1); // -------------------------------------------------------------------------------------------Bottom needs data and diff, check for bug in copy
+				bottomvector[n][0]->CopyFrom(*tempBottomPoint, 0, 1); // ----------------------------------------------------------Causes NAN - does not learn       -   Data copied seems same as original bottom data
+				topvector[n][0]->CopyFrom(*tempTopPoint, 1, 1);
+				//weight_diff_vector[n][0]->CopyFrom(*tempWeight_diff, 1, 1);
+			}
+
+
+			//alter propigation //based on winning neurons
+			Dtype* Winners = winnersaveBlob_->mutable_gpu_data();
+			//for each layer
+			for (int n = 0; n < size; ++n){
+				Dtype* currentLay = topvector[n][0]->mutable_gpu_diff();
+				//loop winning array
+				for (int j = 0; j < (topvector[0][0]->shape(0) * topvector[0][0]->shape(1) * topvector[0][0]->shape(2) * topvector[0][0]->shape(3)); ++j){
+					//zero loosing deltas
+					if (n != Winners[j]){
+						currentLay[j] = 0;
+					}
+				}
+			}
+
+			//perform backward prop
+			//#pragma omp target{
+				#pragma omp parallel for 
+				for (int n = 0; n < size; ++n){
+					this->Conv_Layers_[n]->Backward(topvector[n], propagate_down, bottomvector[n]);  //split blobs for each parrelel layer
+				}
+			///}
+
+			//concatinate updated winning weights into master  (Derotate before replacing)
+
+			//Derotate each Layer 
+			//#pragma omp target{ 
+				#pragma omp parallel for 
+				for (int n = 0; n < size; ++n){
+					if (n != 0){
+						this->Conv_Layers_[n]->DeRotate_gpu(n*this->rotation_stride_);
+					}
+				}
+			//}
+
+
+			//get weights diffs
+			for (int n = 0; n < size; ++n){
+				this->Conv_Layers_[n]->GetWeight_diff(weight_diff_vector[n]);
+				//this->Conv_Layers_[n]->GetBias_diff(bias_diff_vector[n]);
+			}
+
+			//zero weight difs
+			for (int j = 0; j < (this->blobs_[0]->shape(0) * this->blobs_[0]->shape(1) * this->blobs_[0]->shape(2) * this->blobs_[0]->shape(3)); ++j){
+				weight_diff[j] = 0.0;
+			}
+			if (this->bias_term_ && this->param_propagate_down_[1]) {
+				for (int j = 0; j < (this->blobs_[0]->shape(0)); ++j){
+					bias_diff[j] = 0.0;
+					
+				}
+			}
+
+
+			//sum weight diffs
+
+			for (int n = 0; n < size; ++n){
+				Dtype* currentLay = weight_diff_vector[n][0]->mutable_gpu_diff();
+				//loop winning array
+				for (int j = 0; j < (this->blobs_[0]->shape(0) * this->blobs_[0]->shape(1) * this->blobs_[0]->shape(2) * this->blobs_[0]->shape(3)); ++j){
+					//add to bottom output
+					weight_diff[j] = weight_diff[j] + currentLay[j];
+				}
+				if (this->bias_term_ && this->param_propagate_down_[1]) {
+					Dtype* currentLayB = weight_diff_vector[n][1]->mutable_gpu_diff();
+					for (int j = 0; j < (this->blobs_[0]->shape(0)); ++j){
+						bias_diff[j] = bias_diff[j] + currentLayB[j];
+							
+					}
+					
+				}
+			}
+
+
+
+			//add bottom for winners to propigate back
+			Dtype* output = bottom[0]->mutable_gpu_diff();
+			for (int j = 0; j < (bottomvector[0][0]->shape(0) * bottomvector[0][0]->shape(1) * bottomvector[0][0]->shape(2) * bottomvector[0][0]->shape(3)); ++j){
+				output[j] = 0.0;
+			}
+			/////
+			for (int n = 0; n < size; ++n){
+				Dtype* currentLay = bottomvector[n][0]->mutable_gpu_diff();
+				//loop winning array
+				for (int j = 0; j < (bottomvector[0][0]->shape(0) * bottomvector[0][0]->shape(1) * bottomvector[0][0]->shape(2) * bottomvector[0][0]->shape(3)); ++j){
+					//add to bottom output
+					output[j] = output[j] + currentLay[j];
+				}
+			}
+			//////
+
+
+
+			//clean up memory
+			for (int Flay = 0; Flay < size; ++Flay){ //for each layer
+				delete bottomvector[Flay][0];
+				delete topvector[Flay][0];
+				delete weight_diff_vector[Flay][0];
+				delete weight_diff_vector[Flay][1];
+			}
+
+
+		
+		
+		
+		}
+
+}
+
+INSTANTIATE_LAYER_GPU_FUNCS(ConvolutionLayer);
+
+}  // namespace caffe
